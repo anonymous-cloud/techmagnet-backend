@@ -118,6 +118,71 @@ class TaskRepository {
   }
 
   /**
+   * Updates a task record with provided fields
+   * @param {number} id - Internal task ID
+   * @param {Object} updateData - Key/value pairs to update
+   * @returns {Promise<Object>} Updated task record
+   */
+  async update(id, updateData) {
+    try {
+      const keys = Object.keys(updateData);
+      const values = Object.values(updateData);
+
+      if (keys.length === 0) {
+        throw new Error('No fields to update');
+      }
+
+      const setClause = keys.map(key => `${key} = ?`).join(', ');
+      const query = `UPDATE tasks SET ${setClause} WHERE id = ?`;
+
+      const [result] = await pool.execute(query, [...values, id]);
+
+      if (result.affectedRows === 0) {
+        throw new Error('Task not found');
+      }
+
+      return this.findById(id);
+
+    } catch (error) {
+      logger.error('Database error in TaskRepository.update', {
+        error: error.message,
+        code: error.code,
+        id,
+        updateData
+      });
+
+      throw new Error(`Database error: ${error.message}`);
+    }
+  }
+
+  /** 
+   * Deletes a task by internal ID
+   * @param {number} id - Internal task ID
+   * @returns {Promise<void>}
+   */
+  async deleteById(id) {
+    try {
+      const query = 'DELETE FROM tasks WHERE id = ?';
+      const [result] = await pool.execute(query, [id]);
+
+      if (result.affectedRows === 0) {
+        throw new Error('Task not found');
+      }
+
+      return;
+
+    } catch (error) {
+      logger.error('Database error in TaskRepository.deleteById', {
+        error: error.message,
+        code: error.code,
+        id
+      });
+
+      throw new Error(`Database error: ${error.message}`);
+    }
+  }
+
+  /**
    * Finds all tasks with optional filters
    * NOTE: Intentionally added for Module 3 (Dashboard) which requires
    * listing tasks with pagination and filtering capabilities

@@ -1,6 +1,9 @@
 const logger = require('../utils/logger');
 const { fetchSERPData } = require('./dataForSeoService');
 const taskRepository = require('../repositories/taskRepository');
+const taskJobRepository = require('../repositories/taskJobRepository');
+const taskQueue = require('../queues/task.queue');
+const redis = require('../config/redis');
 const { DuplicateTaskError, ExternalApiError, DatabaseError } = require('../errors');
 
 /**
@@ -94,57 +97,131 @@ function toBusinessObject(dbRecord) {
  * @param {number} taskInput.priority - Priority (1 or 2)
  * @returns {Promise<Object>} Business object representing created task
  */
-async function createTask(taskInput) {
+async function createTask(taskInput, idempotencyKey) {
   const { keyword, language, location, priority } = taskInput;
 
   try {
     logger.info('Task creation started', { keyword });
 
-    // Step 1: Call DataForSEO API
-    const apiResponse = await fetchSERPData(keyword, location, language, priority);
-
-    // Step 2: Check if API call was successful
-    if (!apiResponse.success) {
-      logger.warn('DataForSEO request failed', { 
-        errorCode: apiResponse.error.code,
-        keyword 
-      });
-      throw new ExternalApiError(apiResponse.error.message);
+    // 1) Idempotency-Key lookup (Redis)
+    if (idempotencyKey) {
+      try {
+        const redisKey = `idempotency:${idempotencyKey}`;
+        const existingTaskId = await redis.get(redisKey);
+        if (existingTaskId) {
+          const existing = await taskRepository.findById(Number(existingTaskId));
+          if (existing) {
+            logger.info('Idempotency key matched existing task', { taskId: existing.id });
+            return toBusinessObject(existing);
+          }
+        }
+      } catch (err) {
+        logger.warn('Idempotency Redis lookup failed, continuing', { error: err.message });
+      }
     }
 
-    logger.info('DataForSEO request completed', { keyword });
+    // 2) Deterministic duplicate check (keyword, language, location, priority)
+    const candidates = await taskRepository.findAll({ keyword });
+    const duplicate = candidates.find(t =>
+      t.language_code === language &&
+      Number(t.location_code) === Number(location) &&
+      Number(t.priority) === Number(priority)
+    );
 
-    // Step 3: Check for duplicates (using task_id from API response)
-    await checkDuplicate(apiResponse.data.task_id);
+    if (duplicate) {
+      // If there is a task_jobs record check its status
+      try {
+        const jobRecord = await taskJobRepository.findByTaskId(duplicate.id);
+        const jobStatus = jobRecord ? jobRecord.status : null;
 
-    // Step 4: Map API response to database model
-    const taskData = mapTaskData(apiResponse.data);
+        if (!jobStatus || ['PENDING', 'PROCESSING', 'COMPLETED'].includes(jobStatus)) {
+          logger.info('Deterministic duplicate found; returning existing task', { taskId: duplicate.id, jobStatus });
+          return toBusinessObject(duplicate);
+        }
+        // if jobStatus === 'FAILED' continue to create new task
+      } catch (err) {
+        logger.warn('Failed to read task_jobs for duplicate check; returning existing task as safe default', { error: err.message, taskId: duplicate.id });
+        return toBusinessObject(duplicate);
+      }
+    }
 
-    // Step 5: Save to database
-    const createdTask = await saveTask(taskData);
+    // 3) Create tasks record with required initial values
+    const taskData = {
+      task_id: null,
+      status_code: 0,
+      status_message: 'PENDING',
+      cost: 0.0000,
+      execution_time: 0.0000,
+      keyword: keyword,
+      location_code: location,
+      language_code: language,
+      priority: priority,
+      created_by: 'system'
+    };
 
-    logger.info('Task saved successfully', { 
-      taskId: createdTask.task_id,
-      keyword 
-    });
+    const createdTask = await taskRepository.create(taskData);
 
-    // Step 6: Return business object
+    // 4) Enqueue job with BullMQ
+    let job;
+    try {
+      job = await taskQueue.add('processTask', { taskId: createdTask.id });
+    } catch (err) {
+      logger.error('Failed to enqueue job; rolling back created task', { error: err.message, taskId: createdTask.id });
+      try {
+        await taskRepository.deleteById(createdTask.id);
+      } catch (delErr) {
+        logger.error('Failed to rollback task after queue.add failure', { error: delErr.message, taskId: createdTask.id });
+      }
+      throw new Error('Failed to enqueue processing job');
+    }
+
+    // 5) Persist task_jobs record
+    try {
+      await taskJobRepository.create({
+        task_id: createdTask.id,
+        job_id: job.id,
+        status: 'PENDING'
+      });
+    } catch (err) {
+      logger.error('Failed to create task_jobs record; removing job and rolling back task', { error: err.message, jobId: job.id, taskId: createdTask.id });
+      try {
+        await taskQueue.remove(job.id);
+      } catch (removeErr) {
+        logger.error('Failed to remove job after task_jobs failure', { error: removeErr.message, jobId: job.id });
+      }
+      try {
+        await taskRepository.deleteById(createdTask.id);
+      } catch (delErr) {
+        logger.error('Failed to rollback task after task_jobs create failure', { error: delErr.message, taskId: createdTask.id });
+      }
+      throw new Error('Failed to persist job metadata');
+    }
+
+    // 6) Save Idempotency-Key mapping in Redis (if provided)
+    if (idempotencyKey) {
+      try {
+        const redisKey = `idempotency:${idempotencyKey}`;
+        await redis.set(redisKey, String(createdTask.id), 'EX', 86400);
+      } catch (err) {
+        logger.warn('Failed to save idempotency mapping to Redis', { error: err.message, taskId: createdTask.id });
+      }
+    }
+
+    // 7) Return business object (do not expose job id)
     return toBusinessObject(createdTask);
 
   } catch (error) {
-    logger.error('Task creation failed', { 
+    logger.error('Task creation failed', {
       error: error.message,
-      keyword 
+      keyword
     });
 
-    // Re-throw known errors
-    if (error instanceof DuplicateTaskError || 
-        error instanceof ExternalApiError || 
+    if (error instanceof DuplicateTaskError ||
+        error instanceof ExternalApiError ||
         error instanceof DatabaseError) {
       throw error;
     }
 
-    // Wrap unknown errors
     throw new DatabaseError('Task creation failed');
   }
 }
