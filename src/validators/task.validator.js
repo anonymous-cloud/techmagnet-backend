@@ -56,4 +56,14 @@ const validateTaskInput = (data) => {
   };
 };
 
-module.exports = { validateTaskInput };
+function validateCsvRow(data) {
+  const result = validateTaskInput(data);
+
+  return {
+    isValid: result.isValid,
+    errors: result.errors.map((error) => error.message),
+    normalizedData: result.normalizedData
+  };
+}
+
+module.exports = { validateTaskInput, validateCsvRow };

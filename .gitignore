@@ -2,3 +2,7 @@ node_modules/
 logs/
 .env
 *.log
+.tmp/
+tasks.csv
+tasks_250.csv
+wsl

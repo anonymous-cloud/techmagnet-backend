@@ -71,6 +71,104 @@ async function saveTask(taskData) {
   }
 }
 
+async function createPendingTask(taskInput) {
+  const taskData = {
+    task_id: null,
+    status_code: 0,
+    status_message: 'PENDING',
+    cost: 0.0000,
+    execution_time: 0.0000,
+    keyword: taskInput.keyword,
+    location_code: taskInput.location,
+    language_code: taskInput.language,
+    priority: taskInput.priority,
+    created_by: taskInput.created_by || 'system'
+  };
+
+  const createdTask = await saveTask(taskData);
+
+  let job;
+  try {
+    job = await taskQueue.add('processTask', { taskId: createdTask.id });
+  } catch (err) {
+    logger.error('Failed to enqueue job; rolling back created task', { error: err.message, taskId: createdTask.id });
+    try {
+      await taskRepository.deleteById(createdTask.id);
+    } catch (delErr) {
+      logger.error('Failed to rollback task after queue.add failure', { error: delErr.message, taskId: createdTask.id });
+    }
+    throw new Error('Failed to enqueue processing job');
+  }
+
+  try {
+    await taskJobRepository.create({
+      task_id: createdTask.id,
+      job_id: job.id,
+      status: 'PENDING'
+    });
+  } catch (err) {
+    logger.error('Failed to create task_jobs record; removing job and rolling back task', { error: err.message, jobId: job.id, taskId: createdTask.id });
+    try {
+      await taskQueue.remove(job.id);
+    } catch (removeErr) {
+      logger.error('Failed to remove job after task_jobs failure', { error: removeErr.message, jobId: job.id });
+    }
+    try {
+      await taskRepository.deleteById(createdTask.id);
+    } catch (delErr) {
+      logger.error('Failed to rollback task after task_jobs create failure', { error: delErr.message, taskId: createdTask.id });
+    }
+    throw new Error('Failed to persist job metadata');
+  }
+
+  return createdTask;
+}
+
+async function createBulkTasks(batchRows) {
+  const createdTasks = [];
+
+  for (const row of batchRows) {
+    const taskData = {
+      task_id: null,
+      status_code: 0,
+      status_message: 'PENDING',
+      cost: 0.0000,
+      execution_time: 0.0000,
+      keyword: row.keyword,
+      location_code: row.location,
+      language_code: row.language,
+      priority: row.priority,
+      created_by: 'system'
+    };
+
+    const createdTask = await saveTask(taskData);
+    createdTasks.push(createdTask);
+  }
+
+  const jobPayload = {
+    type: 'BULK_TASK_BATCH',
+    tasks: createdTasks.map((task) => ({
+      taskId: task.id,
+      keyword: task.keyword,
+      language_code: task.language_code,
+      location_code: task.location_code,
+      priority: task.priority
+    }))
+  };
+
+  const job = await taskQueue.add('processTaskBatch', jobPayload);
+
+  await Promise.all(createdTasks.map((task) =>
+    taskJobRepository.create({
+      task_id: task.id,
+      job_id: job.id,
+      status: 'PENDING'
+    })
+  ));
+
+  return job;
+}
+
 /**
  * Transforms database record to business object
  * @param {Object} dbRecord - Raw database record
@@ -226,4 +324,4 @@ async function createTask(taskInput, idempotencyKey) {
   }
 }
 
-module.exports = { createTask };
+module.exports = { createTask, createPendingTask, createBulkTasks };
