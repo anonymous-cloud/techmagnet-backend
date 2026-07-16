@@ -1,42 +1,29 @@
 const logger = require('../utils/logger');
 
 /**
- * Global error handling middleware
- * Catches all errors and returns consistent JSON responses
+ * Express global error handling middleware
  */
-const errorHandler = (err, req, res, next) => {
-  // Log error
+function errorHandler(err, req, res, next) {
+  const statusCode = err.statusCode || 500;
+  const errorCode = err.code || 'UNKNOWN_ERROR';
+  const errorMessage = err.message || 'An unexpected error occurred';
+
   logger.error('Error occurred', {
-    error: err.message,
-    code: err.code || 'UNKNOWN',
-    statusCode: err.statusCode || 500,
+    method: req.method,
     path: req.path,
-    method: req.method
+    statusCode,
+    code: errorCode,
+    error: errorMessage,
+    stack: err.stack
   });
 
-  // Handle operational errors (AppError and its subclasses)
-  if (err.isOperational) {
-    return res.status(err.statusCode).json({
-      success: false,
-      error: {
-        code: err.code,
-        message: err.message
-      }
-    });
-  }
-
-  // Handle unexpected errors
-  // Don't expose stack traces in production
-  const isDevelopment = process.env.NODE_ENV !== 'production';
-
-  return res.status(500).json({
+  res.status(statusCode).json({
     success: false,
     error: {
-      code: 'INTERNAL_ERROR',
-      message: isDevelopment ? err.message : 'An unexpected error occurred',
-      ...(isDevelopment && { stack: err.stack })
+      code: errorCode,
+      message: errorMessage
     }
   });
-};
+}
 
 module.exports = errorHandler;

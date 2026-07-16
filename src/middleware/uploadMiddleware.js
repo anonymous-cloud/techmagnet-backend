@@ -1,58 +1,41 @@
 const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { AppError } = require('../errors');
 
-const storage = multer.memoryStorage();
+// Ensure uploads folder exists in workspace
+const uploadDir = path.join(__dirname, '../../uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
 
-const csvFileFilter = (req, file, cb) => {
-  const allowedMimeTypes = [
-   'text/csv',
-  'application/vnd.ms-excel',
-  'text/plain',
-  'application/octet-stream'
-  ];
-
-  const fileExtension = file.originalname ? file.originalname.toLowerCase().endsWith('.csv') : false;
-
-  if (!fileExtension || !allowedMimeTypes.includes(file.mimetype)) {
-    return cb(new Error('Only CSV files are allowed'));
-  }
-
-  cb(null, true);
-};
-
-const upload = multer({
-  storage,
-  fileFilter: csvFileFilter,
-  limits: {
-    fileSize: 5 * 1024 * 1024 // 5MB max file size
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
   }
 });
 
-const csvUpload = (req, res, next) => {
-  const handler = upload.single('file');
-
-  handler(req, res, (err) => {
-    if (err) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: 'FILE_UPLOAD_ERROR',
-          message: err.message || 'CSV upload failed'
-        }
-      });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: 'FILE_REQUIRED',
-          message: 'CSV file is required'
-        }
-      });
-    }
-
-    next();
-  });
+const fileFilter = (req, file, cb) => {
+  // Allow only CSV files
+  if (file.mimetype === 'text/csv' || path.extname(file.originalname).toLowerCase() === '.csv') {
+    cb(null, true);
+  } else {
+    cb(new AppError('Only CSV files are allowed', 400, 'INVALID_FILE_TYPE'), false);
+  }
 };
 
-module.exports = { csvUpload };
+const csvUpload = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 2 * 1024 * 1024 // 2MB limit
+  }
+}).single('file');
+
+module.exports = {
+  csvUpload
+};

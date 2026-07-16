@@ -6,3 +6,4 @@ logs/
 tasks.csv
 tasks_250.csv
 wsl
+.vscode/

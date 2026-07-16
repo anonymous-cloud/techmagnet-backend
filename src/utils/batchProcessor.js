@@ -1,17 +1,20 @@
 /**
- * Splits an array into batches of the specified size.
- * @param {Array} items - The items to batch.
- * @param {number} batchSize - Maximum number of items per batch.
- * @returns {Array<Array>} Array of batches.
+ * Reusable utility to split arrays into chunks of configurable size
+ * @param {Array} array - Array to split
+ * @param {number} size - Maximum size of each chunk (default 100)
+ * @returns {Array<Array>} Array of chunks
  */
-function batchProcessor(items, batchSize = 100) {
-  const batches = [];
-
-  for (let i = 0; i < items.length; i += batchSize) {
-    batches.push(items.slice(i, i + batchSize));
+function chunkArray(array, size = 100) {
+  if (!Array.isArray(array)) {
+    throw new Error('Input must be an array');
   }
-
-  return batches;
+  const chunks = [];
+  for (let i = 0; i < array.length; i += size) {
+    chunks.push(array.slice(i, i + size));
+  }
+  return chunks;
 }
 
-module.exports = { batchProcessor };
+module.exports = {
+  chunkArray
+};
